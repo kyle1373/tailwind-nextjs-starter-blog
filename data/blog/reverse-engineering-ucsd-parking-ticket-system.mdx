@@ -1,0 +1,123 @@
+---
+title: "Reverse Engineering UCSD's Parking Ticket System (and 100+ other universities)"
+date: '2024-09-25'
+lastmod: '2024-09-25'
+tags: ['python', 'selenium', 'web scraping', 'next-js']
+draft: false
+summary: 'A full on investigation with how UC San Diego administers parking tickets, leading to the creation of a website which tracked the location of parking tickets in real time. Eventually, the website got shut down by UC San Diego. TODO: ChatGPT this'
+images: ['/static/images/twitter-card.png']
+---
+
+## Introduction
+
+TODO: ChatGPT some overview
+
+<TOCInline toc={props.toc} exclude="Introduction" />
+
+## Article (TODO: MAKE HEADING AND SUBHEADINGS)
+
+I've studied at the University of California, San Diego (UCSD) ever since starting my Bachelor's here in 2020. There's a lot I love about this school — the weather, beaches, people, professors, raccoons, and so much more. However, I'm pretty sure there's one thing everyone here dislikes: parking tickets.
+
+A few weeks ago, my friend showed me his $80 parking ticket he got at UCSD. In the screenshot, I noticed something interesting...
+
+![Parking Tickets 1](/static/blog/reverse-engineering-ucsd/parking_tickets_1.png)
+
+If you didn't catch it at first, don't worry. Let me show you another picture that makes it a little more obvious. Pay attention to the citation number and issue date columns.
+
+![Parking Tickets 2](/static/blog/reverse-engineering-ucsd/parking_tickets_2.png)
+
+In this screenshot, I noticed that older parking tickets have lower citation numbers than later ones, sorted in ascending order. It could be a coincidence, but since there's 4 in a row, it seems very unlikely. I suspected that some form of auto incrementing is going on with the parking ticket's citation numbers. Very interesting...let's look into it further.
+
+There's a website which allows anyone to pay their parking tickets by looking up a citation number. The website is completely unauthed, meaning anyone can access the site without being logged in or creating an account. This is perfect for people who aren't affiliated with UCSD and need to pay their parking tickets. For me, this is a perfect opportunity to test my hypothesis.
+
+![UCSD Parking Ticket Homepage](/static/blog/reverse-engineering-ucsd/homepage.png)
+
+So we know that `15207413515` is a valid citation number. Let's enter it on this website and see what we get...
+
+![UCSD Parking Ticket Paid](/static/blog/reverse-engineering-ucsd/homepage_paid.png)
+
+As expected, we can see that the citation has already been paid through an error message popup. Now let's increment that number by 1 and try `15207413516`...
+
+![UCSD Parking Ticket Paid](/static/blog/reverse-engineering-ucsd/homepage_paid.png)
+
+Strange. This citation also shows that it has been paid. I tried this with 15207413517, 15207413518, 15207413519, 15207413520, and so on. All of those citations were already paid for. Just to be certain, I tried a really high citation ID that I thought was invalid, like 15207499999.
+
+![UCSD Parking Ticket Validation Error](/static/blog/reverse-engineering-ucsd/homepage_validation_error.png)
+
+This time a different error message appears, showing that the citation does not exist in the system. This means that the website does a database query on every parking ticket lookup, and I'm more convinced that some form of auto incrementing is going on. This got me wondering – what happens if we get the largest citation number that is still a valid ticket? Will it be a ticket issued recently?
+
+We know that this citation number is somewhere between 15207400000 and 15207499999 based on our previous lookups assuming that citation numbers are in sorted order. To find this boundary number efficiently, we can write a program which performs a binary search between 15207400000 through 15207499999 and checks if the ticket exists through webscraping the HTML with Selenium. If the parking ticket exists, move forward. If the parking ticket does not exist, move backwards.
+
+![Performing a Binary Search](/static/blog/reverse-engineering-ucsd/binary_search.png)
+
+Our binary search found <b className="text-orange-400">15207422649</b> to be the latest citation number. Let's enter that into the website...
+
+![Parking Ticket 15207422649](/static/blog/reverse-engineering-ucsd/15207422649.png)
+
+Not only was this an unpaid parking citation, but this was a parking citation issued TODAY (9/13/2024). The location of the parking ticket, the parking ticket fee, the (censored) license plate, and payment status were also given.
+
+If I decremented the citation number to 15207422648 and looked it up, I got another valid parking citation with a recent issue date. This confirms my suspicion that UCSD auto increments their citation numbers.
+
+So now I have all the tools needed to get all of UCSD's unpaid parking tickets in their database. I just need to create a script which decrements the citation number each time and scrapes the HTML. I also created a website to display this data.
+
+![ucsdtickets.com version 1](/static/blog/reverse-engineering-ucsd/ucsdtickets_ver1.png)
+
+I kept this script going for a few hours and got 462 valid parking citations. As we can see, Athena parking structure and Campus Point East are areas which UCSD issues a lot of parking tickets.
+
+However, there was one thing that was still bothering me: while I knew 15207400001 and 15207306439 were valid citation numbers, 15207399999 was not a valid citation number, despite it being between these two numbers. Somehow there were gaps in the auto incrementing pattern. It would take me a good 30 or so minutes, but I would eventually also figure this out. To explain this, let us finally break down citation numbers once and for all.
+
+## Reverse Engineering Citation Numbers
+
+Let's take the following citation number:
+
+15207306439
+
+Citation numbers are composed of 3 parts. The first 3 numbers are always going to be 152, which I suppose is UCSD specific. The next 3 numbers are what's called the device ID, which is the ID of device that the citation was issued with. The final 5 digits are the report number which is auto incremented among each device.
+
+So for instance, 15207306439 means that this citation is done on device 73, and it is the 6,439th citation given out on that device.
+
+After figuring this out, I performed a binary search on each device to see what the latest citation number was for each of them. I figured out that there were 93 different devices, meaning that the device number could be between 001 and 093.
+
+Now that we've fully cracked the algorithm, how could we take advantage of this?
+
+Well, what if we created a real time tracker of tickets being issued live on campus?
+
+The premise is pretty straightforward. Now that we know that citation numbers are predictable, we just need to write a script which constantly checks if a valid ticket exists for the next expected citation number for each device. Once it exists, we pull the data and push it to the database, then move on to the next citation number on that device. This creates a real time system which listens to new tickets being issued all across campus at UCSD.
+
+After creating this new real time scraper, I also added a few new features to the site, such as searching tickets by location and device number.
+
+![ucsdtickets.com version 2](/static/blog/reverse-engineering-ucsd/ucsdtickets_ver2.png)
+
+It worked like clockwork. I was super excited and looked forward to the novel types of insights that would be gained from analyzing this data after a few months. Unfortunately, this scraping would be tragically cut short.
+
+## UCSD shuts down the website
+
+A week after starting my initial real time scraping, someone discovered my website and posted about it on UCSD's subreddit.
+
+![r/ucsd Reddit Post](/static/blog/reverse-engineering-ucsd/reddit_post.png)
+
+Now truthfully I have no idea who posted this. I told a few of my close friends about the website. Maybe they told their friends and that's how it went public, or Google may have indexed my site and somehow got it on the search results. Either way, a lot of eyes were on my website.
+
+![ucsdtickets.com Analytics](/static/blog/reverse-engineering-ucsd/ucsdtickets_analytics.png)
+
+While this was cool publicity, I knew this was going to destroy my website, as UCSD would eventually discover my web scraping and figure out a way to disable it. As expected, what they did next would bring this entire operation to an end.
+
+![UCSD patches their citation website](/static/blog/reverse-engineering-ucsd/homepage_broken.png)
+
+UCSD changed their parking citation website to require BOTH a citation number and license plate to look up a parking ticket. Since there is no way for me to figure out a citation number's license plate, this scraping method no longer worked, and I was forced to shut it down.
+
+For the 1 week that my scraper ran, 665 tickets were processed, totaling $56,900 in parking ticket fees with the most expensive parking ticket being $920. You can view an archive of this data over at https://ucsdtickets.com. While I had a lot of fun reverse engineering the system, this was understandably a huge security issue for UCSD, and I fully back their decision in shutting down my website.
+
+## This is bigger than just UCSD (TODO FIX THIS TITLE)
+
+So that's where the story would have ended until I later noticed that UCSD's ticketing system is being hosted by another company. Curious, I checked what other institutions used this other company...
+
+![300+ websites which use the same parking ticket infrastructure](/static/blog/reverse-engineering-ucsd/similar_websites.png)
+
+With a Google search, I found that over 300 different institutions, universities, colleges, and more use this exact same company to issue parking tickets. Curious, I checked out San Diego State University's (SDSU) parking ticket website to see if my real time ticket scraper works on their website.
+
+![SDSU parking ticket lookup](/static/blog/reverse-engineering-ucsd/sdsu_lookup.png)
+
+Yep, it works.
+
+I won't bother with creating another real time system for SDSU or any other college that uses this company, so if you're interested in doing it yourself, my code is over at https://github.com/kyle1373/ucsd-ticket-scraper.
